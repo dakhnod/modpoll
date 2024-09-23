@@ -5,7 +5,9 @@ import re
 import signal
 import sys
 import threading
+import time
 from datetime import timezone
+import asyncio
 
 from modpoll.arg_parser import get_parser
 from modpoll.modbus_task import (
@@ -30,29 +32,24 @@ from . import __version__
 
 LOG_SIMPLE = "%(asctime)s | %(levelname).1s | %(name)s | %(message)s"
 logger = None
-event_exit = threading.Event()
-
 
 def setup_logging(level, format):
     logging.basicConfig(level=level, format=format)
 
 
-def _signal_handler(signal, frame):
-    logger.info(f"Exiting {sys.argv[0]}")
-    event_exit.set()
-
-
-def get_utc_time():
-    dt = datetime.datetime.now(timezone.utc)
-    utc_time = dt.replace(tzinfo=timezone.utc)
-    return utc_time.timestamp()
-
-
-def app(name="modpoll"):
+async def app(name="modpoll"):
     print(
         f"\nModpoll v{__version__} - A New Command-line Tool for Modbus and MQTT\n",
         flush=True,
     )
+
+    # event_exit = asyncio.Future()
+
+    tasks = []
+
+    def _signal_handler(signal, frame):
+        logger.info(f"Exiting {sys.argv[0]}")
+        event_exit.set_result(None)
 
     signal.signal(signal.SIGINT, _signal_handler)
 
@@ -111,37 +108,40 @@ def app(name="modpoll"):
     else:
         logger.info("No MQTT host specified, skip MQTT setup.")
 
-    # main loop
-    last_check = 0
-    last_diag = 0
-    while not event_exit.is_set():
-        now = get_utc_time()
-        # routine check
-        if now > last_check + args.rate:
-            if last_check == 0:
-                elapsed = args.rate
-            else:
-                elapsed = round(now - last_check, 6)
-            last_check = now
-            logger.info(
-                f" ====== modpoll polling at rate:{args.rate}s, actual:{elapsed}s ======"
-            )
-            modbus_poll()
-            if event_exit.is_set():
-                break
-            if args.mqtt_host:
-                if args.timestamp:
-                    modbus_publish(timestamp=now)
-                else:
-                    modbus_publish()
-            if args.export:
-                if args.timestamp:
-                    modbus_export(args.export, timestamp=now)
-                else:
-                    modbus_export(args.export)
-        if args.diagnostics_rate > 0 and now > last_diag + args.diagnostics_rate:
-            last_diag = now
-            modbus_publish_diagnostics()
+    if args.rate:
+        async def read_bus():
+            last_publish = 0
+            while True:
+                elapsed = time.time() - last_publish
+                last_publish = time.time()
+                logger.info(
+                    f" ====== modpoll polling at rate:{args.rate}s, actual:{elapsed}s ======"
+                )
+                now = time.time()
+                await modbus_poll()
+                if args.mqtt_host:
+                    if args.timestamp:
+                        modbus_publish(timestamp=now)
+                    else:
+                        modbus_publish()
+                if args.export:
+                    if args.timestamp:
+                        modbus_export(args.export, timestamp=now)
+                    else:
+                        modbus_export(args.export)
+                if args.once:
+                    event_exit.set_result(None)
+                await asyncio.sleep(args.rate)
+        asyncio.create_task(read_bus())
+
+    if args.diagnostics_rate:
+        async def diag_loop():
+            while True:
+                modbus_publish_diagnostics()
+                await asyncio.sleep(args.diagnostics_rate)
+        asyncio.create_task(diag_loop())
+
+        """
         if event_exit.is_set():
             break
         # Check if receive mqtt request
@@ -179,13 +179,19 @@ def app(name="modpoll"):
                 except KeyError:
                     logger.error(f"No required key found: {payload}")
                 except json.decoder.JSONDecodeError:
-                    logger.error(f"Failed to parse json message: {payload}")
-        if args.once:
-            event_exit.set()
-            break
+                    logger.error(f"Failed to parse json message: {payload}")#
+        """
+
+    await event_exit
+
+    print("stopping event loop")
+
+    loop = asyncio.get_running_loop()
+    loop.stop()
+
     modbus_close()
     mqttc_close()
 
 
 if __name__ == "__main__":
-    app()
+    asyncio.run(app())

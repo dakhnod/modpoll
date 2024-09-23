@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import time
+import asyncio
 
 import requests
 from prettytable import PrettyTable
@@ -478,7 +479,7 @@ def modbus_setup(config, event) -> bool:
     return True
 
 
-def modbus_poll():
+async def modbus_poll():
     if not master:
         return
     master.connect()
@@ -489,10 +490,8 @@ def modbus_poll():
         for p in dev.pollerList:
             if not p.disabled:
                 p.poll()
-                if event_exit.is_set():
-                    master.close()
-                    return
-                event_exit.wait(timeout=args.interval)
+                # with asyncio.Timeout(args.interval):
+                #     await event_exit
     master.close()
     # print out result, if not in daemon mode
     if not args.daemon:
